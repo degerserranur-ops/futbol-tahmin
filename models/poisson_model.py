@@ -16,7 +16,7 @@ yaklaşımdır; amaç istatistiksel bir tahmin/analiz aracı sunmaktır, kesin s
 garantisi değildir.
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.stats import poisson
@@ -28,6 +28,12 @@ class MatchResult:
     away: str
     home_goals: int
     away_goals: int
+    # İlk yarı (devre arası) gol sayıları -- SADECE football-data.org kaynaklı
+    # maçlarda gerçek veri var (FlashScore'un tournaments/results ucu devre arası
+    # skorunu vermiyor). None ise bu maç ilk-yarı oranı hesabında kullanılmaz,
+    # ama tam-maç (attack/defense) eğitimine normal şekilde dahil olur.
+    home_goals_ht: Optional[int] = None
+    away_goals_ht: Optional[int] = None
 
 
 @dataclass
@@ -45,6 +51,12 @@ class PoissonGoalModel:
         self.strengths: Dict[str, TeamStrength] = {}
         self.league_avg_home_goals = 1.4
         self.league_avg_away_goals = 1.1
+        # İlk yarıda oynanan golün tüm maç golüne oranı -- "İlk Yarı Tahmini"
+        # (bkz. predict()) için kullanılır. Gerçek devre-arası verisi varsa
+        # fit() içinde bu oran hesaba göre güncellenir; yoksa (örn. sadece
+        # FlashScore'dan beslenen ligler) futbol istatistiklerinde yaygın
+        # kullanılan ~%45 varsayımında kalır.
+        self.first_half_ratio = 0.45
 
     def fit(self, matches: List[MatchResult]) -> None:
         if not matches:
@@ -78,6 +90,19 @@ class PoissonGoalModel:
             attack = float(np.mean(gf)) if gf else 1.0
             defense = float(np.mean(ga)) if ga else 1.0
             self.strengths[t] = TeamStrength(attack=attack, defense=defense)
+
+        # --- İlk yarı oranı: gerçek devre-arası verisi olan maçlardan (varsa) ---
+        ht_total = 0
+        ft_total = 0
+        for m in matches:
+            if m.home_goals_ht is not None and m.away_goals_ht is not None:
+                ht_total += m.home_goals_ht + m.away_goals_ht
+                ft_total += m.home_goals + m.away_goals
+        if ft_total > 0 and ht_total > 0:
+            ratio = ht_total / ft_total
+            # makul aralıkta tut (çok az maç varsa aşırı sapmasın)
+            self.first_half_ratio = float(np.clip(ratio, 0.30, 0.60))
+        # yoksa __init__'teki varsayılan (0.45) olduğu gibi kalır
 
     def _get_strength(self, team: str) -> TeamStrength:
         if team not in self.strengths:
@@ -152,6 +177,30 @@ class PoissonGoalModel:
             h, a = np.unravel_index(idx, matrix.shape)
             top_scores.append({"skor": f"{h}-{a}", "olasilik": float(matrix[h, a])})
 
+        # çifte şans (double chance) -- 1X2'den direkt türetiliyor, ek veri gerekmiyor
+        cifte_sans = {
+            "1x": round(min(home_win + draw, 1.0), 3),
+            "x2": round(min(draw + away_win, 1.0), 3),
+            "12": round(min(home_win + away_win, 1.0), 3),
+        }
+
+        # ilk yarı (devre arası) tahmini -- tam maç lambda'sı self.first_half_ratio
+        # ile ölçeklenip AYNI Poisson yöntemiyle ayrı bir 1-X-2 çıkarılıyor.
+        # Not: takım bazlı değil, lig/genel bir oranla yaklaşıklanıyor --
+        # gerçek devre-arası verisi olmayan liglerde (çoğu FlashScore ligi)
+        # tek makul seçenek bu (bkz. fit()).
+        lam_h_ht = lam_h * self.first_half_ratio
+        lam_a_ht = lam_a * self.first_half_ratio
+        home_probs_ht = poisson.pmf(goals_idx, lam_h_ht)
+        away_probs_ht = poisson.pmf(goals_idx, lam_a_ht)
+        matrix_ht = np.outer(home_probs_ht, away_probs_ht)
+        matrix_ht /= matrix_ht.sum()
+        ilk_yari = {
+            "ev": round(float(np.tril(matrix_ht, -1).sum()), 3),
+            "beraberlik": round(float(np.trace(matrix_ht)), 3),
+            "deplasman": round(float(np.triu(matrix_ht, 1).sum()), 3),
+        }
+
         return {
             "ev": home,
             "deplasman": away,
@@ -175,4 +224,6 @@ class PoissonGoalModel:
                 "alt": round(under_1_5, 3),
             },
             "en_olasi_skorlar": top_scores,
+            "cifte_sans": cifte_sans,
+            "ilk_yari": ilk_yari,
         }

@@ -227,7 +227,16 @@ def to_match_result(m: dict) -> Optional[MatchResult]:
     hg, ag = ft.get("home"), ft.get("away")
     if hg is None or ag is None:
         return None
-    return MatchResult(home=m["homeTeam"]["name"], away=m["awayTeam"]["name"], home_goals=hg, away_goals=ag)
+    # devre arası skoru -- football-data.org kaynaklı maçlarda gerçek veri var,
+    # FlashScore kaynaklılarda yok (halfTime hep None); PoissonGoalModel.fit()
+    # bunu opsiyonel kullanıyor, yoksa varsayılan orana düşüyor (bkz. poisson_model.py)
+    ht = m["score"].get("halfTime") or {}
+    hg_ht, ag_ht = ht.get("home"), ht.get("away")
+    return MatchResult(
+        home=m["homeTeam"]["name"], away=m["awayTeam"]["name"],
+        home_goals=hg, away_goals=ag,
+        home_goals_ht=hg_ht, away_goals_ht=ag_ht,
+    )
 
 
 def build_models_per_competition(matches: List[dict]) -> Dict[str, dict]:
@@ -391,6 +400,7 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
 
         model_info = models.get(code)
         tahmin_1x2 = ev_pct = draw_pct = away_pct = bek_ev = bek_dep = ust25 = alt25 = kg_var = kg_yok = ust15_pct = not_text = None
+        cs_1x = cs_x2 = cs_12 = iy_ev_pct = iy_ber_pct = iy_dep_pct = en_olasi_skor = None
 
         if model_info is None:
             not_text = "Yetersiz geçmiş veri"
@@ -412,6 +422,19 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
             kg_var = round(pred["kg"]["var"] * 100, 1)
             kg_yok = round(pred["kg"]["yok"] * 100, 1)
             ust15_pct = round(pred["1.5_gol"]["ust"] * 100, 1)
+
+            # yeni: çifte şans, ilk yarı tahmini, en olası skor (mevcut sütunları
+            # bozmadan MODEL TAHMİNİ bloğunun sonuna ekleniyor)
+            cs = pred["cifte_sans"]
+            cs_1x = round(cs["1x"] * 100, 1)
+            cs_x2 = round(cs["x2"] * 100, 1)
+            cs_12 = round(cs["12"] * 100, 1)
+            iy = pred["ilk_yari"]
+            iy_ev_pct = round(iy["ev"] * 100, 1)
+            iy_ber_pct = round(iy["beraberlik"] * 100, 1)
+            iy_dep_pct = round(iy["deplasman"] * 100, 1)
+            top_skor = pred["en_olasi_skorlar"][0]
+            en_olasi_skor = f"{top_skor['skor']} (%{round(top_skor['olasilik'] * 100)})"
 
             # şeffaflık: tahmin kadro yüzünden ayarlandıysa "Not" sütununda açıkça yazsın
             missing_notes = []
@@ -446,6 +469,13 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
             kg_var,
             kg_yok,
             ust15_pct,
+            cs_1x,
+            cs_x2,
+            cs_12,
+            iy_ev_pct,
+            iy_ber_pct,
+            iy_dep_pct,
+            en_olasi_skor,
             not_text,
             hakem,
             stad,
@@ -460,13 +490,19 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
 #  9 İY-Ev  10 İY-Dep  11 MS-Ev  12 MS-Dep
 #  13 Tahmin  14 Ev%  15 Ber.%  16 Dep.%  17 Bek.Ev  18 Bek.Dep  19 2.5Üst%  20 2.5Alt%
 #  21 KGVar%  22 KGYok%  23 1.5Üst%
-#  24 Not
-#  25 Hakem  26 Stad/Şehir  27 Hava  28 Kadro
+#  24 1X%  25 X2%  26 12%  (çifte şans)
+#  27 İY-Ev%  28 İY-Ber%  29 İY-Dep%  (ilk yarı tahmini)
+#  30 En Olası Skor
+#  31 Not
+#  32 Hakem  33 Stad/Şehir  34 Hava  35 Kadro
 SUB_HEADERS = [
     "Tarih", "Gün", "Saat", "Ülke", "Lig", "Ev Sahibi", "Deplasman", "Durum",
     "Ev", "Dep", "Ev", "Dep",
     "1/X/2", "Ev %", "Ber %", "Dep %", "Ev", "Dep",
     "2.5 Üst %", "2.5 Alt %", "Var %", "Yok %", "1.5 Üst %",
+    "1X %", "X2 %", "12 %",
+    "Ev %", "Ber %", "Dep %",
+    "En Olası Skor",
     "Not",
     "Hakem", "Stad / Şehir", "Hava", "Kadro",
 ]
@@ -481,6 +517,9 @@ GROUPS = [
     ("İY SKOR", 2, "3498DB"),
     ("MS SKOR", 2, "1F618D"),
     ("MODEL TAHMİNİ", 11, "27AE60"),
+    ("ÇİFTE ŞANS", 3, "1ABC9C"),
+    ("İLK YARI TAHMİNİ", 3, "2980B9"),
+    ("EN OLASI SKOR", 1, "138D75"),
     ("NOT", 1, "7F8C8D"),
     ("EK BİLGİ (Hakem/Hava/Kadro)", 4, "8E44AD"),
 ]
@@ -576,9 +615,10 @@ def write_excel(rows: List[list], out_path: str, meta: dict) -> None:
             else:
                 cell.fill = scheduled_fill
 
-            # model tahmini bloğu (13-23) hafif yeşil arka planla öne çıksın
+            # model tahmini bloğu (13-30: 1/X/2...1.5Üst%, çifte şans, ilk yarı,
+            # en olası skor) hafif yeşil arka planla öne çıksın
             # (durum canlı/bitti rengi zaten üstte ezdiği için sadece scheduled/zebra'da uygula)
-            if 13 <= c <= 23 and not is_live and not is_finished:
+            if 13 <= c <= 30 and not is_live and not is_finished:
                 cell.fill = pred_block_fill
 
         # takım isimleri kalın
@@ -588,7 +628,7 @@ def write_excel(rows: List[list], out_path: str, meta: dict) -> None:
         ws.cell(row=r, column=7).alignment = left
 
         # yüzde sütunları: ondalık format
-        for c in (14, 15, 16, 19, 20, 21, 22, 23):
+        for c in (14, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29):
             cell = ws.cell(row=r, column=c)
             if cell.value is not None:
                 cell.number_format = "0.0"
@@ -603,7 +643,8 @@ def write_excel(rows: List[list], out_path: str, meta: dict) -> None:
         if tv in TAHMIN_RENK:
             tahmin_cell.font = Font(name=FONT_NAME, size=11, bold=True, color=TAHMIN_RENK[tv])
 
-    widths = [11, 11, 6, 10, 19, 20, 20, 12, 5, 5, 5, 5, 7, 7, 7, 7, 6, 6, 7, 7, 7, 7, 7, 18,
+    widths = [11, 11, 6, 10, 19, 20, 20, 12, 5, 5, 5, 5, 7, 7, 7, 7, 6, 6, 7, 7, 7, 7, 7,
+              7, 7, 7, 7, 7, 7, 14, 18,
               14, 24, 20, 45]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w

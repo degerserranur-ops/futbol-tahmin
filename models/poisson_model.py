@@ -15,11 +15,28 @@ Bu, gerçek bahis şirketlerinin kullandığı modellere göre basitleştirilmi�
 yaklaşımdır; amaç istatistiksel bir tahmin/analiz aracı sunmaktır, kesin sonuç
 garantisi değildir.
 """
+import datetime as dt
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.stats import poisson
+
+
+def _dixon_coles_tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
+    """Dixon-Coles düzeltme fonksiyonu (tau). Bağımsız Poisson modelinin
+    düşük skorlarda (özellikle beraberliklerde) yaptığı sistematik sapmayı
+    düzeltir. rho=0 -> tau=1 (tüm skorlarda), yani düzeltme tamamen etkisiz
+    olur ve matris eski (düzeltmesiz) haliyle aynı kalır."""
+    if x == 0 and y == 0:
+        return 1 - lam * mu * rho
+    if x == 0 and y == 1:
+        return 1 + lam * rho
+    if x == 1 and y == 0:
+        return 1 + mu * rho
+    if x == 1 and y == 1:
+        return 1 - rho
+    return 1.0
 
 
 @dataclass
@@ -34,6 +51,10 @@ class MatchResult:
     # ama tam-maç (attack/defense) eğitimine normal şekilde dahil olur.
     home_goals_ht: Optional[int] = None
     away_goals_ht: Optional[int] = None
+    # Maçın tarihi (ISO string, örn. "2026-09-01T18:00:00+00:00") -- SADECE
+    # zaman ağırlıklandırma (bkz. fit()) için kullanılır. None ise o maç
+    # normal (ağırlıksız) kabul edilir, model davranışı önceki gibi kalır.
+    date: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +78,50 @@ class PoissonGoalModel:
         # FlashScore'dan beslenen ligler) futbol istatistiklerinde yaygın
         # kullanılan ~%45 varsayımında kalır.
         self.first_half_ratio = 0.45
+        # Dixon-Coles düzeltmesi: bağımsız Poisson modeli düşük skorlu
+        # beraberlikleri (özellikle 1-1) hafife alma eğiliminde -- rho bunu
+        # düzeltir (bkz. score_matrix). 0.0 = düzeltme yok (eski davranış).
+        # fit() içinde geçmiş maçlardan tahmin edilir; tahmin başarısız olursa
+        # ya da yeterli veri yoksa 0.0'da kalır.
+        self.rho = 0.0
+        # Zaman ağırlıklandırma: eski maçlar katlanarak azalan ağırlık alır
+        # (exp(-xi * gün)), güncel form geçmişten daha belirleyici olsun diye.
+        # Literatürde (Dixon-Coles zaman-ağırlıklı varyantları) yaygın kullanılan
+        # değer araliği ~0.0018-0.0033/gün; burada 0.0018 (daha yumuşak azalma)
+        # kullanılıyor. Maçlarda tarih yoksa (date=None) ağırlık 1.0 kalır,
+        # yani davranış öncekiyle aynı olur.
+        self.time_decay_xi = 0.0018
+
+    def _match_weights(self, matches: List["MatchResult"]) -> List[float]:
+        """Her maça exp(-xi * yaş_gün) ağırlığı verir; referans nokta en güncel
+        maçın tarihidir (gerçek "bugün" fit() içine ayrıca verilmiyor, en
+        yakın maç ona en yakın yaklaşıklamadır). Tarihsiz maç varsa (date=None)
+        o maça 1.0 (tam ağırlık) verilir -- bu, tarih bilgisi hiç yoksa TÜM
+        maçların 1.0 alıp eski (ağırlıksız) davranışa dönmesini sağlar.
+        """
+        parsed = []
+        for m in matches:
+            if not m.date:
+                parsed.append(None)
+                continue
+            try:
+                parsed.append(dt.datetime.fromisoformat(m.date.replace("Z", "+00:00")))
+            except (ValueError, TypeError):
+                parsed.append(None)
+
+        valid_dates = [d for d in parsed if d is not None]
+        if not valid_dates:
+            return [1.0] * len(matches)
+
+        ref = max(valid_dates)
+        weights = []
+        for d in parsed:
+            if d is None:
+                weights.append(1.0)
+                continue
+            age_days = max((ref - d).total_seconds() / 86400.0, 0.0)
+            weights.append(float(np.exp(-self.time_decay_xi * age_days)))
+        return weights
 
     def fit(self, matches: List[MatchResult]) -> None:
         if not matches:
@@ -67,29 +132,68 @@ class PoissonGoalModel:
             teams.add(m.home)
             teams.add(m.away)
 
-        total_home_goals = sum(m.home_goals for m in matches)
-        total_away_goals = sum(m.away_goals for m in matches)
-        n = len(matches)
-        self.league_avg_home_goals = total_home_goals / n
-        self.league_avg_away_goals = total_away_goals / n
+        weights = self._match_weights(matches)
+        w_sum = sum(weights)
+        total_home_goals_w = sum(m.home_goals * w for m, w in zip(matches, weights))
+        total_away_goals_w = sum(m.away_goals * w for m, w in zip(matches, weights))
+        self.league_avg_home_goals = total_home_goals_w / w_sum
+        self.league_avg_away_goals = total_away_goals_w / w_sum
 
         goals_for: Dict[str, List[float]] = {t: [] for t in teams}
         goals_against: Dict[str, List[float]] = {t: [] for t in teams}
+        goals_for_w: Dict[str, List[float]] = {t: [] for t in teams}
+        goals_against_w: Dict[str, List[float]] = {t: [] for t in teams}
 
-        for m in matches:
+        for m, w in zip(matches, weights):
             # ev sahibinin attığı gol, lig ev ortalamasına göre normalize
             goals_for[m.home].append(m.home_goals / self.league_avg_home_goals)
             goals_against[m.home].append(m.away_goals / self.league_avg_away_goals)
+            goals_for_w[m.home].append(w)
+            goals_against_w[m.home].append(w)
             # deplasman takımının attığı gol, lig deplasman ortalamasına göre
             goals_for[m.away].append(m.away_goals / self.league_avg_away_goals)
             goals_against[m.away].append(m.home_goals / self.league_avg_home_goals)
+            goals_for_w[m.away].append(w)
+            goals_against_w[m.away].append(w)
 
         for t in teams:
-            gf = goals_for[t]
-            ga = goals_against[t]
-            attack = float(np.mean(gf)) if gf else 1.0
-            defense = float(np.mean(ga)) if ga else 1.0
+            gf, gf_w = goals_for[t], goals_for_w[t]
+            ga, ga_w = goals_against[t], goals_against_w[t]
+            attack = float(np.average(gf, weights=gf_w)) if gf else 1.0
+            defense = float(np.average(ga, weights=ga_w)) if ga else 1.0
             self.strengths[t] = TeamStrength(attack=attack, defense=defense)
+
+        # --- Dixon-Coles rho düzeltmesi: bağımsız Poisson'un düşük skorlu
+        # beraberlikleri (özellikle 1-1) hafife alma eğilimini düzeltmek için,
+        # zaten hesaplanmış attack/defense'i sabit tutup rho'yu 1-boyutlu
+        # maksimum olabilirlik ile tahmin ediyoruz. Sadece 0-0/1-0/0-1/1-1
+        # skorlarını etkiler (bkz. score_matrix) -- diğer skorlarda etkisiz. ---
+        try:
+            import scipy.optimize as _opt
+
+            low_score_matches = []
+            for m in matches:
+                if (m.home_goals, m.away_goals) in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                    lam_h, lam_a = self.expected_goals(m.home, m.away)
+                    low_score_matches.append((m.home_goals, m.away_goals, lam_h, lam_a))
+
+            if len(low_score_matches) >= 20:
+                def neg_log_lik(rho):
+                    total = 0.0
+                    for x, y, lam, mu in low_score_matches:
+                        tau = _dixon_coles_tau(x, y, lam, mu, rho)
+                        if tau <= 1e-6:
+                            return 1e6
+                        total += np.log(tau)
+                    return -total
+
+                res = _opt.minimize_scalar(neg_log_lik, bounds=(-0.25, 0.25), method="bounded")
+                if res.success:
+                    self.rho = float(np.clip(res.x, -0.25, 0.25))
+            # yetersiz veri varsa __init__'teki varsayılan (0.0, düzeltme yok) kalır
+        except Exception:
+            # rho tahmini başarısız olursa modeli bozmak yerine düzeltmesiz (0.0) bırak
+            self.rho = 0.0
 
         # --- İlk yarı oranı: gerçek devre-arası verisi olan maçlardan (varsa) ---
         ht_total = 0
@@ -141,7 +245,14 @@ class PoissonGoalModel:
         home_probs = poisson.pmf(goals, lam_h)
         away_probs = poisson.pmf(goals, lam_a)
         matrix = np.outer(home_probs, away_probs)
-        matrix /= matrix.sum()  # kesilen kuyruğu normalize et
+
+        # Dixon-Coles düzeltmesi (rho=0 ise tau=1, matris değişmez -- eski davranış)
+        if self.rho != 0.0:
+            for x, y in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                tau = _dixon_coles_tau(x, y, lam_h, lam_a, self.rho)
+                matrix[x, y] *= max(tau, 0.0)
+
+        matrix /= matrix.sum()  # kesilen kuyruğu + tau düzeltmesini normalize et
         return matrix
 
     def predict(

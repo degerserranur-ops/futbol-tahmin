@@ -236,6 +236,7 @@ def to_match_result(m: dict) -> Optional[MatchResult]:
         home=m["homeTeam"]["name"], away=m["awayTeam"]["name"],
         home_goals=hg, away_goals=ag,
         home_goals_ht=hg_ht, away_goals_ht=ag_ht,
+        date=m.get("utcDate"),
     )
 
 

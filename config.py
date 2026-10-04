@@ -1,0 +1,167 @@
+"""
+Proje ayarları.
+
+Veri kaynağı: football-data.org (v4 API)
+  - Ücretsiz plan: Şampiyonlar Ligi, Premier League, La Liga, Bundesliga,
+    Ligue 1, Serie A, Eredivisie, Primeira Liga, Championship, Dünya Kupası,
+    Avrupa Şampiyonası, Brezilya Serie A - SONSUZA DEK ücretsiz.
+  - Süper Lig bu planda YOK (bkz. areas/mac-tahmin-sistemi notları).
+  - Dakikalık istek limiti var (~10/dk); data/football_data_client.py
+    tüm cevapları cache'ler.
+
+API anahtarı (token) almak için:
+  1) https://www.football-data.org/client/register üzerinden ücretsiz
+     kayıt ol.
+  2) Hesabından aldığın token'ı .env dosyasına ekle:
+     FOOTBALL_DATA_TOKEN=xxxxxxxxxxxxxxxx
+"""
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---- football-data.org (aktif veri kaynağı) ----
+FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN", "")
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+
+# Takip edilecek turnuvalar (football-data.org competition kodları).
+# Süper Lig free tier'da olmadığı için şimdilik listede değil.
+COMPETITIONS = {
+    "premier_league": "PL",   # İngiltere
+    "la_liga": "PD",          # İspanya (Primera Division)
+    "serie_a": "SA",          # İtalya
+    "bundesliga": "BL1",      # Almanya
+    "ligue_1": "FL1",         # Fransa
+    "ucl": "CL",              # UEFA Şampiyonlar Ligi
+    "eredivisie": "DED",      # Hollanda
+    "primeira_liga": "PPL",   # Portekiz
+    "brezilya_serie_a": "BSA",  # Brezilya
+    "championship": "ELC",   # İngiltere 2. lig
+}
+
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
+CACHE_TTL_HOURS = 6  # maç durumları (skor, saat) güncellenebildiği için kısa TTL
+
+# ---- eski veri kaynağı: API-Football (kullanılmıyor; hesap askıya alındı) ----
+API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
+API_FOOTBALL_HOST = os.getenv("API_FOOTBALL_HOST", "v3.football.api-sports.io")
+API_FOOTBALL_BASE_URL = f"https://{API_FOOTBALL_HOST}"
+LEAGUES = {
+    "super_lig": 203,
+    "premier_league": 39,
+    "la_liga": 140,
+    "serie_a": 135,
+    "bundesliga": 78,
+    "ligue_1": 61,
+    "ucl": 2,
+}
+CURRENT_SEASON = int(os.getenv("SEASON", "2026"))
+
+# ---- FlashScore (RapidAPI "flashscore4") -- Süper Lig + hakem/stad/kadro/hava zenginleştirme ----
+# Ücretsiz RapidAPI planı AYDA SADECE 500 istek veriyor -- bu yüzden:
+#   - Süper Lig fikstür/sonuç çağrıları cache'lenir (TTL ~6 saat).
+#   - Hakem/stad/kadro zenginleştirmesi SADECE yakın zamanda (ENRICHMENT_WINDOW_HOURS
+#     içinde) başlayacak, en fazla ENRICHMENT_MAX_MATCHES kadar maça uygulanır.
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+
+SUPER_LIG = {
+    "country_id": 191,
+    "tournament_id": "ABdATjMP",
+    "tournament_stage_id": "2TRNmxYR",
+    "tournament_template_id": "Opdcd08Q",
+    "season_id": "190",
+    "code": "SUPER_LIG",
+    "name": "Süper Lig",
+}
+
+# FlashScore tournament_id / tournament_stage_id eşlemesi -- top-scorer bazlı
+# "kilit oyuncu eksik mi" kontrolü için (bkz. flashscore_client.get_top_scorers).
+# football-data.org kodlarıyla (PL/PD/SA/BL1/FL1/CL) + SUPER_LIG eşleşiyor.
+FLASHSCORE_TOURNAMENTS = {
+    "PL": {"tournament_id": "SY30SsKF", "tournament_stage_id": "CfoA8Dmm"},
+    "PD": {"tournament_id": "QeI1Oeyi", "tournament_stage_id": "dWdJXP6U"},
+    "SA": {"tournament_id": "WdNk9YwP", "tournament_stage_id": "CfujcOgK"},
+    "BL1": {"tournament_id": "KY7LrA6d", "tournament_stage_id": "jg0MwVuC"},
+    "FL1": {"tournament_id": "0Mp0HlJb", "tournament_stage_id": "CQF28KxR"},
+    "CL": {"tournament_id": "tfRdlhP9", "tournament_stage_id": "vT1iNRGq"},
+    "SUPER_LIG": {"tournament_id": "ABdATjMP", "tournament_stage_id": "2TRNmxYR"},
+}
+
+# football-data.org'da OLMAYAN ek ligler -- Süper Lig ile aynı yöntemle
+# (tournaments/results + tournaments/fixtures, tournament_template_id +
+# season_id ile) FlashScore üzerinden çekilir. ID'ler general/tournaments
+# (ülkeye göre lig listesi) + tournaments/ids (url -> id eşlemesi) ile
+# tek seferlik bulundu, sezon boyunca değişmez.
+FLASHSCORE_EXTRA_LEAGUES = {
+    "TFF1": {
+        "code": "TFF1", "name": "TFF 1. Lig", "ulke": "Türkiye",
+        "tournament_id": "4j3BAWrp", "tournament_stage_id": "llS6O0mJ",
+        "tournament_template_id": "Spw6Az1D", "season_id": "190",
+    },
+    "JPL": {
+        "code": "JPL", "name": "Jupiler Pro League", "ulke": "Belçika",
+        "tournament_id": "QNIOJe2e", "tournament_stage_id": "MFaWsPnS",
+        "tournament_template_id": "dG2SqPrf", "season_id": "190",
+    },
+    "ARG": {
+        "code": "ARG", "name": "Liga Profesional (Arjantin)", "ulke": "Arjantin",
+        "tournament_id": "j1MnZ14E", "tournament_stage_id": "dEDMdu1s",
+        "tournament_template_id": "naYhNOaA", "season_id": "185",
+    },
+    "UEL": {
+        "code": "UEL", "name": "UEFA Avrupa Ligi", "ulke": "Avrupa",
+        "tournament_id": "nTFvUo9N", "tournament_stage_id": "OjQOTQKa",
+        "tournament_template_id": "ClDjv3V5", "season_id": "190",
+    },
+    "UECL": {
+        "code": "UECL", "name": "UEFA Avrupa Konferans Ligi", "ulke": "Avrupa",
+        "tournament_id": "zcdxsAHq", "tournament_stage_id": "8WHkz50k",
+        "tournament_template_id": "GfRbsVWM", "season_id": "190",
+    },
+    "BL2": {
+        "code": "BL2", "name": "2. Bundesliga", "ulke": "Almanya",
+        "tournament_id": "tM115Db3", "tournament_stage_id": "6khmdCet",
+        "tournament_template_id": "tKH71vSe", "season_id": "190",
+    },
+    "FL2": {
+        "code": "FL2", "name": "Ligue 2 (Fransa)", "ulke": "Fransa",
+        "tournament_id": "42ie8pto", "tournament_stage_id": "zX0tEFE6",
+        "tournament_template_id": "Y35Jer59", "season_id": "190",
+    },
+    "UNL": {
+        "code": "UNL", "name": "UEFA Uluslar Ligi", "ulke": "Avrupa",
+        "tournament_id": "A332sepf", "tournament_stage_id": "A1uGXGgK",
+        "tournament_template_id": "A9yxE9Ke", "season_id": "190",
+    },
+}
+for _key, _info in FLASHSCORE_EXTRA_LEAGUES.items():
+    FLASHSCORE_TOURNAMENTS[_key] = {
+        "tournament_id": _info["tournament_id"],
+        "tournament_stage_id": _info["tournament_stage_id"],
+    }
+
+# Kilit oyuncu (lig top skorerleri arasındaki) kadroda yoksa o takımın hücum
+# gücüne uygulanacak çarpan (1.0 = etkisiz; 0.85 = %15 hücum gücü düşüşü).
+KEY_PLAYER_MISSING_ATTACK_MULT = 0.85
+KEY_PLAYER_TOP_N = 2  # ligin ilk N golcüsünden biri eksikse etkiyi uygula
+
+ENRICHMENT_WINDOW_HOURS = 30   # bu saatten daha yakın başlayacak maçlara hakem/stad/kadro çekilir
+ENRICHMENT_MAX_MATCHES = 10    # bir çalıştırmada en fazla bu kadar maça FlashScore detay çağrısı yapılır
+LINEUP_WINDOW_HOURS = 3        # kadro genelde maça çok yakın yayınlanır; bu saatten yakınsa kadro da çekilir
+# NOT: RapidAPI ücretsiz planı AYDA 500 istek veriyor. Günde 3 çalıştırma x
+# ~10-15 istek/çalıştırma ile bu sınıra yaklaşılabilir; aşılırsa FlashScore
+# çağrıları 429 ile başarısız olur ve kod bunu zaten yakalayıp o alanları
+# "-" ile sessizce atlar (hiçbir şey çökmez) -- ay sonunda sıfırlanır.
+
+# ---- Open-Meteo (ücretsiz, key gerektirmiyor) -- hava durumu ----
+OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Elo modeli parametreleri
+ELO_START = 1500
+ELO_K = 20
+ELO_HOME_ADVANTAGE = 60  # ev sahibine eklenen sanal puan
+
+# Poisson modeli parametreleri
+RECENT_MATCHES_WINDOW = 10  # form hesaplarken bakılacak son maç sayısı
+MIN_MATCHES_FOR_MODEL = 8   # bir ligde tahmin üretmek için gereken min. bitmiş maç

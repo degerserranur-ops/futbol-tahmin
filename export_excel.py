@@ -256,8 +256,36 @@ def build_models_per_competition(matches: List[dict]) -> Dict[str, dict]:
         elo = EloRatings()
         for r in results:
             elo.update_match(r.home, r.away, r.home_goals, r.away_goals)
-        models[code] = {"poisson": poisson_model, "elo": elo, "n_matches": len(results)}
+        # "results" da saklanıyor: bitmiş bir maçın kendi tahminini üretirken
+        # kendi sonucunu eğitimden çıkarabilmek (leave-one-out) için -- bkz.
+        # build_rows. Aksi halde bitmiş bir maç, kendi sonucunun katkıda
+        # bulunduğu bir modelle tahmin edilmiş olur (hafif, ama gerçek bir
+        # kendi-kendini-doğrulama sızıntısı).
+        models[code] = {
+            "poisson": poisson_model, "elo": elo, "n_matches": len(results),
+            "results": results,
+        }
     return models
+
+
+def _leave_one_out_model(results: List[MatchResult], home: str, away: str, date: Optional[str]) -> Optional[PoissonGoalModel]:
+    """Bitmiş bir maçı tahmin ederken kendi sonucunu eğitim setinden çıkarıp
+    ayrı bir model döndürür. Eşleşme bulunamazsa veya çıkarma sonrası veri
+    yetersiz kalırsa None döner (çağıran taraf bu durumda paylaşılan/ortak
+    modele geri döner -- davranış öncekiyle aynı kalır)."""
+    idx = None
+    for i, r in enumerate(results):
+        if r.home == home and r.away == away and r.date == date:
+            idx = i
+            break
+    if idx is None:
+        return None
+    trimmed = results[:idx] + results[idx + 1:]
+    if len(trimmed) < config.MIN_MATCHES_FOR_MODEL:
+        return None
+    m = PoissonGoalModel()
+    m.fit(trimmed)
+    return m
 
 
 def score_str(score_block: Optional[dict]) -> str:
@@ -407,6 +435,12 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
             not_text = "Yetersiz geçmiş veri"
         else:
             pm: PoissonGoalModel = model_info["poisson"]
+            if durum == "Bitti":
+                # kendi-kendini-doğrulama sızıntısını önle: bu maçın sonucu
+                # olmadan eğitilmiş bir model kullan (bkz. _leave_one_out_model)
+                loo = _leave_one_out_model(model_info["results"], home, away, m["utcDate"])
+                if loo is not None:
+                    pm = loo
             home_mult = config.KEY_PLAYER_MISSING_ATTACK_MULT if ek.get("ev_key_missing") else 1.0
             away_mult = config.KEY_PLAYER_MISSING_ATTACK_MULT if ek.get("dep_key_missing") else 1.0
             pred = pm.predict(home, away, home_attack_mult=home_mult, away_attack_mult=away_mult)

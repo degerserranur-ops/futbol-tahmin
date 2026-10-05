@@ -288,6 +288,30 @@ def _leave_one_out_model(results: List[MatchResult], home: str, away: str, date:
     return m
 
 
+def _leave_one_out_elo(results: List[MatchResult], home: str, away: str, date: Optional[str]) -> Optional[EloRatings]:
+    """_leave_one_out_model ile aynı mantık, Elo için: bitmiş bir maçın
+    tahmininde kullanılacak Elo puanlarını, o maçın kendisi hiç oynanmamış
+    gibi (sıradaki diğer tüm maçlarla, kronolojik sırayla) yeniden hesaplar.
+    Elo sıralı/path-dependent olduğu için Poisson'daki gibi sadece o maçı
+    çıkarıp kalanları eğitmek yeterli -- sıralama zaten korunuyor (results
+    kronolojik). Eşleşme yoksa veya veri yetersizse None döner (çağıran
+    taraf paylaşılan/ortak Elo'ya geri döner)."""
+    idx = None
+    for i, r in enumerate(results):
+        if r.home == home and r.away == away and r.date == date:
+            idx = i
+            break
+    if idx is None:
+        return None
+    trimmed = results[:idx] + results[idx + 1:]
+    if len(trimmed) < config.MIN_MATCHES_FOR_MODEL:
+        return None
+    elo = EloRatings()
+    for r in trimmed:
+        elo.update_match(r.home, r.away, r.home_goals, r.away_goals)
+    return elo
+
+
 def score_str(score_block: Optional[dict]) -> str:
     if not score_block:
         return "-"
@@ -435,15 +459,24 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
             not_text = "Yetersiz geçmiş veri"
         else:
             pm: PoissonGoalModel = model_info["poisson"]
+            elo_model: EloRatings = model_info["elo"]
             if durum == "Bitti":
                 # kendi-kendini-doğrulama sızıntısını önle: bu maçın sonucu
-                # olmadan eğitilmiş bir model kullan (bkz. _leave_one_out_model)
+                # olmadan eğitilmiş bir model/Elo kullan (bkz. _leave_one_out_model,
+                # _leave_one_out_elo) -- Elo için de aynı düzeltme gerekli, yoksa
+                # Poisson tarafında kapattığımız sızıntı Elo üzerinden geri girer.
                 loo = _leave_one_out_model(model_info["results"], home, away, m["utcDate"])
                 if loo is not None:
                     pm = loo
+                loo_elo = _leave_one_out_elo(model_info["results"], home, away, m["utcDate"])
+                if loo_elo is not None:
+                    elo_model = loo_elo
             home_mult = config.KEY_PLAYER_MISSING_ATTACK_MULT if ek.get("ev_key_missing") else 1.0
             away_mult = config.KEY_PLAYER_MISSING_ATTACK_MULT if ek.get("dep_key_missing") else 1.0
-            pred = pm.predict(home, away, home_attack_mult=home_mult, away_attack_mult=away_mult)
+            pred = pm.predict(
+                home, away, home_attack_mult=home_mult, away_attack_mult=away_mult,
+                elo=elo_model, elo_weight=config.ELO_BLEND_WEIGHT,
+            )
             probs = pred["1x2"]
             best = max(probs, key=probs.get)
             tahmin_1x2 = {"ev_kazanir": "1", "beraberlik": "X", "deplasman_kazanir": "2"}[best]

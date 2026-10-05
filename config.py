@@ -161,6 +161,14 @@ OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ELO_START = 1500
 ELO_K = 20
 ELO_HOME_ADVANTAGE = 60  # ev sahibine eklenen sanal puan
+# Elo'nun 1X2 tahminine katkı ağırlığı (0 = hiç katkısı yok/eski davranış,
+# 1 = tamamen Elo). Walk-forward backtest'te (10 lig, 132 test maçı) 0.0'dan
+# 0.6-0.7'ye kadar log-loss/Brier sürekli iyileşiyor (1X2 log-loss 1.2478 ->
+# ~1.05), ama favori-isabet oranı 0.6-0.7'de tepe yapıp 0.9-1.0'da (saf Elo'ya
+# yaklaşınca) %40.9'a kadar düşüyor -- yani körü körüne en iyi log-loss'u
+# vermeyip Poisson'u (asıl gol modeli, diğer TÜM pazarların -- 2.5/1.5 gol,
+# KG, en olası skor -- temeli) baskın tutan ölçülü bir değer seçildi.
+ELO_BLEND_WEIGHT = 0.30
 
 # Poisson modeli parametreleri
 RECENT_MATCHES_WINDOW = 10  # form hesaplarken bakılacak son maç sayısı

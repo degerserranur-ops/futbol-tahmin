@@ -91,6 +91,9 @@ class PoissonGoalModel:
         # kullanılıyor. Maçlarda tarih yoksa (date=None) ağırlık 1.0 kalır,
         # yani davranış öncekiyle aynı olur.
         self.time_decay_xi = 0.0018
+        # Elo harmanlama ağırlığı (bkz. predict()): elo=None verilirse (çoğu
+        # çağrı) bu hiç kullanılmaz, davranış öncekiyle tamamen aynı kalır.
+        self.elo_weight = 0.15
 
     def _match_weights(self, matches: List["MatchResult"]) -> List[float]:
         """Her maça exp(-xi * yaş_gün) ağırlığı verir; referans nokta en güncel
@@ -258,16 +261,41 @@ class PoissonGoalModel:
     def predict(
         self, home: str, away: str,
         home_attack_mult: float = 1.0, away_attack_mult: float = 1.0,
+        elo: Optional[object] = None, elo_weight: Optional[float] = None,
     ) -> Dict:
         """home_attack_mult / away_attack_mult: kadroda kilit bir oyuncu eksikse
         (bkz. export_excel.enrich_upcoming_matches) o tarafın hücum gücünü
-        hafifçe düşürmek için kullanılır (1.0 = etkisiz)."""
+        hafifçe düşürmek için kullanılır (1.0 = etkisiz).
+
+        elo: verilirse (bir EloRatings örneği, bkz. models/elo.py) 1X2
+        olasılığı Poisson'un yanına Elo'nun win_draw_loss_prob() çıktısıyla
+        hafifçe harmanlanır (ağırlık elo_weight, verilmezse self.elo_weight).
+        elo=None (varsayılan) ise HİÇBİR ŞEY değişmez -- önceki davranış
+        (sadece Poisson) tamamen korunur. Sadece 1X2 (ve ondan türeyen çifte
+        şans) etkilenir; skor matrisine dayanan diğer tüm pazarlar (2.5/1.5
+        gol, KG, en olası skorlar, ilk yarı) saf Poisson'dan gelmeye devam
+        eder -- Elo zaten gol sayısını değil sadece galibiyet/mağlubiyet/
+        beraberlik eğilimini modelliyor."""
         matrix = self.score_matrix(home, away, home_attack_mult, away_attack_mult)
         lam_h, lam_a = self.expected_goals(home, away, home_attack_mult, away_attack_mult)
 
         home_win = float(np.tril(matrix, -1).sum())
         draw = float(np.trace(matrix))
         away_win = float(np.triu(matrix, 1).sum())
+
+        if elo is not None:
+            w = self.elo_weight if elo_weight is None else elo_weight
+            w = float(np.clip(w, 0.0, 1.0))
+            try:
+                elo_home, elo_draw, elo_away = elo.win_draw_loss_prob(home, away)
+                home_win = (1 - w) * home_win + w * elo_home
+                draw = (1 - w) * draw + w * elo_draw
+                away_win = (1 - w) * away_win + w * elo_away
+                total = home_win + draw + away_win
+                if total > 0:
+                    home_win, draw, away_win = home_win / total, draw / total, away_win / total
+            except Exception:
+                pass  # Elo harmanlama başarısız olursa sessizce atla, saf Poisson sonucu kalır
 
         goals_idx = np.arange(matrix.shape[0])
         total_goals_grid = goals_idx[:, None] + goals_idx[None, :]

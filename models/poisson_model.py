@@ -91,6 +91,16 @@ class PoissonGoalModel:
         # kullanılıyor. Maçlarda tarih yoksa (date=None) ağırlık 1.0 kalır,
         # yani davranış öncekiyle aynı olur.
         self.time_decay_xi = 0.0018
+        # Shrinkage (Bayesian küçültme): az maçlı bir takımın attack/defense
+        # katsayısı, tek bir aşırı skorlu maçtan (5-0, 4-1 gibi) gerçekte
+        # olduğundan çok daha uç bir değere savrulabiliyor -- bu da predict()'te
+        # aşırı yüksek/alçak beklenen gole, oradan da gerçekte tutmayan "%90+
+        # güvenli" tahminlere yol açıyor (bkz. backtest -- %90-100 güven bandında
+        # gerçek isabet %84.2 çıkmıştı). self.shrinkage_k "sanal pseudo-maç"
+        # sayısıdır: katsayı, lig ortalamasıyla (1.0) n_eff/(n_eff+k) ağırlıklı
+        # harmanlanır -- az maçlı takımlarda (n_eff küçük) etkisi güçlü, çok
+        # maçlı takımlarda (n_eff >> k) ham değere yakınsar.
+        self.shrinkage_k = 5.0
         # Elo harmanlama ağırlığı (bkz. predict()): elo=None verilirse (çoğu
         # çağrı) bu hiç kullanılmaz, davranış öncekiyle tamamen aynı kalır.
         self.elo_weight = 0.15
@@ -162,8 +172,15 @@ class PoissonGoalModel:
         for t in teams:
             gf, gf_w = goals_for[t], goals_for_w[t]
             ga, ga_w = goals_against[t], goals_against_w[t]
-            attack = float(np.average(gf, weights=gf_w)) if gf else 1.0
-            defense = float(np.average(ga, weights=ga_w)) if ga else 1.0
+            raw_attack = float(np.average(gf, weights=gf_w)) if gf else 1.0
+            raw_defense = float(np.average(ga, weights=ga_w)) if ga else 1.0
+            # n_eff: zaman ağırlıklı etkin maç sayısı (bkz. _match_weights) --
+            # shrinkage'ın ne kadar güçlü uygulanacağını belirler.
+            n_eff_attack = sum(gf_w) if gf_w else 0.0
+            n_eff_defense = sum(ga_w) if ga_w else 0.0
+            k = self.shrinkage_k
+            attack = (n_eff_attack * raw_attack + k * 1.0) / (n_eff_attack + k) if n_eff_attack > 0 else 1.0
+            defense = (n_eff_defense * raw_defense + k * 1.0) / (n_eff_defense + k) if n_eff_defense > 0 else 1.0
             self.strengths[t] = TeamStrength(attack=attack, defense=defense)
 
         # --- Dixon-Coles rho düzeltmesi: bağımsız Poisson'un düşük skorlu

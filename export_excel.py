@@ -35,6 +35,7 @@ from data.flashscore_client import (
     find_match_id_by_teams, summarize_lineup_side, key_scorer_names, player_missing_from_lineup,
 )
 from data.weather_client import get_weather_at
+from data import history_store
 from models.elo import EloRatings
 from models.poisson_model import MatchResult, PoissonGoalModel
 
@@ -156,11 +157,29 @@ def collect_live_gap_matches(fs: FlashScoreClient, known_teams: set, code: str, 
     return out
 
 
+def _merge_with_history(code: str, out: List[dict]) -> List[dict]:
+    """Bu çalıştırmada elde edilen 'out' listesindeki BİTMİŞ maçları kalıcı
+    tarihçeye (data/history_store.py) işler, ardından training havuzu olarak
+    şunu döndürür: tarihçedeki TÜM bilinen bitmiş maçlar + bu run'da gelen
+    bitmemiş (Planlandı/canlı) maçlar. Böylece 'results' çağrısı bu run'da
+    hiç başarısız olsa bile (out tamamen boş gelse bile), elimizde geçmişte
+    biriktirilmiş bitmiş maç havuzu training için hâlâ mevcut olur -- sadece
+    o run için YENİ bitmiş maç bilgisi eksik kalır, TÜM geçmiş kaybolmaz."""
+    history_store.merge_into_history(code, out)
+    combined: Dict[str, dict] = dict(history_store.load_history(code))
+    for m in out:
+        if m.get("status") != "FINISHED":
+            combined[m["id"]] = m
+    return list(combined.values())
+
+
 def collect_super_lig_matches() -> List[dict]:
     """Süper Lig'i football-data.org'da olmadığı için FlashScore'dan çeker ve
     diğer turnuvalarla aynı dict şekline çevirir. Hata olursa (key yok, limit
-    aşıldı, vb.) sessizce boş liste döner -- Süper Lig olmadan da pipeline çalışsın."""
+    aşıldı, vb.) kalıcı tarihçedeki bilinen maçlarla devam eder."""
     fs = FlashScoreClient()
+    code = config.SUPER_LIG["code"]
+    name = config.SUPER_LIG["name"]
     results, fixtures = [], []
     try:
         results = fs.get_super_lig_results(max_pages=2)
@@ -170,11 +189,7 @@ def collect_super_lig_matches() -> List[dict]:
         fixtures = fs.get_super_lig_fixtures(max_pages=2)
     except FlashScoreError as e:
         print(f"  UYARI [Süper Lig fikstür / FlashScore]: {e}")
-    if not results and not fixtures:
-        return []
 
-    code = config.SUPER_LIG["code"]
-    name = config.SUPER_LIG["name"]
     out = []
     seen = set()
     for m in results:
@@ -188,20 +203,23 @@ def collect_super_lig_matches() -> List[dict]:
         seen.add(m["match_id"])
         out.append(fs_match_to_fd_shape(m, code, name, is_result=False))
 
-    known_teams = {mm["homeTeam"]["name"] for mm in out} | {mm["awayTeam"]["name"] for mm in out}
-    out.extend(collect_live_gap_matches(fs, known_teams, code, name, seen, out))
-    return out
+    if out:
+        known_teams = {mm["homeTeam"]["name"] for mm in out} | {mm["awayTeam"]["name"] for mm in out}
+        out.extend(collect_live_gap_matches(fs, known_teams, code, name, seen, out))
+    return _merge_with_history(code, out)
 
 
 def collect_flashscore_extra_league(league_key: str) -> List[dict]:
     """Süper Lig'in dışında, football-data.org'da OLMAYAN ek bir ligi
     (TFF 1. Lig, Jupiler Pro League, Arjantin Liga Profesional, UEFA Avrupa
     Ligi/Konferans Ligi -- bkz. config.FLASHSCORE_EXTRA_LEAGUES) aynı yöntemle
-    FlashScore'dan çeker. Hata olursa sessizce boş liste döner."""
+    FlashScore'dan çeker. Hata olursa kalıcı tarihçedeki bilinen maçlarla devam eder."""
     info = config.FLASHSCORE_EXTRA_LEAGUES.get(league_key)
     if not info:
         return []
     fs = FlashScoreClient()
+    code = info["code"]
+    name = info["name"]
     results, fixtures = [], []
     try:
         results = fs.get_tournament_results(info["tournament_template_id"], info["season_id"], max_pages=2)
@@ -211,11 +229,7 @@ def collect_flashscore_extra_league(league_key: str) -> List[dict]:
         fixtures = fs.get_tournament_fixtures(info["tournament_template_id"], info["season_id"], max_pages=2)
     except FlashScoreError as e:
         print(f"  UYARI [{info['name']} fikstür / FlashScore]: {e}")
-    if not results and not fixtures:
-        return []
 
-    code = info["code"]
-    name = info["name"]
     out = []
     seen = set()
     for m in results:
@@ -229,9 +243,10 @@ def collect_flashscore_extra_league(league_key: str) -> List[dict]:
         seen.add(m["match_id"])
         out.append(fs_match_to_fd_shape(m, code, name, is_result=False))
 
-    known_teams = {mm["homeTeam"]["name"] for mm in out} | {mm["awayTeam"]["name"] for mm in out}
-    out.extend(collect_live_gap_matches(fs, known_teams, code, name, seen, out))
-    return out
+    if out:
+        known_teams = {mm["homeTeam"]["name"] for mm in out} | {mm["awayTeam"]["name"] for mm in out}
+        out.extend(collect_live_gap_matches(fs, known_teams, code, name, seen, out))
+    return _merge_with_history(code, out)
 
 
 def to_match_result(m: dict) -> Optional[MatchResult]:
@@ -831,6 +846,13 @@ def main():
         comp_labels.append("super_lig")
 
     if not args.no_extra_leagues:
+        # NOT: kota durumuna bakıp bir ligi hiç DENEMEDEN atlamıyoruz --
+        # cache (7 gün TTL) zaten çoğu zaman hiç ağ isteği gerektirmiyor, bu
+        # yüzden "kalan istek az" diye önceden atlamak, bedavaya gelecek
+        # cache'lenmiş veriyi de boşuna feda ederdi. Her lig kendi
+        # cache-önce / 429'da bayat-cache'e-düş / son çare kalıcı tarihçe
+        # zincirini (bkz. flashscore_client.get, _merge_with_history) zaten
+        # kendi içinde yürütüyor; burada sadece deniyoruz.
         for league_key, league_info in config.FLASHSCORE_EXTRA_LEAGUES.items():
             extra_matches = collect_flashscore_extra_league(league_key)
             print(f"{league_info['name']} (FlashScore): {len(extra_matches)} maç")
@@ -879,6 +901,11 @@ def main():
     }
     write_excel(rows, args.out, meta)
     print(f"Yazıldı: {args.out} ({len(rows)} satır, gösterim aralığı {display_start} -> {end})")
+
+    quota = FlashScoreClient().get_quota_status()
+    if quota and quota.get("remaining") is not None:
+        limit_txt = f"/{quota['limit']}" if quota.get("limit") is not None else ""
+        print(f"RapidAPI (FlashScore) kota durumu: kalan {quota['remaining']}{limit_txt} istek (son görülen: {quota.get('checked_at', '-')})")
 
 
 if __name__ == "__main__":

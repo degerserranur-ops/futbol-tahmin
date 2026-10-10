@@ -30,6 +30,14 @@ import config
 
 BASE_URL = "https://flashscore4.p.rapidapi.com/api/flashscore/v2"
 
+# RapidAPI her cevapta kalan/limit bilgisini bu header'larda döndürüyor.
+# En son görülen değeri diske yazıp saklıyoruz ki 429 ile sürpriz
+# yaşamadan önce "kota tükenmek üzere" uyarısı verebilelim (bkz.
+# FlashScoreClient._record_quota / get_quota_status).
+QUOTA_REMAINING_HEADER = "x-ratelimit-requests-remaining"
+QUOTA_LIMIT_HEADER = "x-ratelimit-requests-limit"
+QUOTA_FILE_NAME = "_flashscore_quota.json"
+
 
 class FlashScoreError(RuntimeError):
     pass
@@ -83,6 +91,46 @@ class FlashScoreClient:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
 
+    # ---------- kota takibi ----------
+
+    def _quota_path(self) -> str:
+        return os.path.join(self.cache_dir, QUOTA_FILE_NAME)
+
+    def _record_quota(self, resp: "requests.Response") -> None:
+        """Cevaptaki kalan/limit header'larını (varsa) diske yazar. 429 dahil
+        HER cevapta çağrılır -- RapidAPI bu header'ları hata cevaplarında da
+        gönderiyor, dolayısıyla kotanın tam ne zaman sıfırlandığını/tükendiğini
+        de buradan görebiliyoruz."""
+        remaining = resp.headers.get(QUOTA_REMAINING_HEADER)
+        limit = resp.headers.get(QUOTA_LIMIT_HEADER)
+        if remaining is None and limit is None:
+            return
+        try:
+            with open(self._quota_path(), "w", encoding="utf-8") as f:
+                json.dump({
+                    "remaining": int(remaining) if remaining is not None else None,
+                    "limit": int(limit) if limit is not None else None,
+                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }, f)
+        except (ValueError, OSError):
+            pass
+
+    def get_quota_status(self) -> Optional[dict]:
+        """En son görülen kota durumunu döndürür (dosyadan) -- yoksa None."""
+        try:
+            with open(self._quota_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def quota_low(self, safety_margin: int = 15) -> bool:
+        """Kalan istek sayısı güvenlik eşiğinin altındaysa True -- çağıran
+        taraf bununla düşük öncelikli ligleri atlayıp kotayı koruyabilir."""
+        status = self.get_quota_status()
+        if not status or status.get("remaining") is None:
+            return False
+        return status["remaining"] <= safety_margin
+
     # ---------- asıl istek ----------
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, ttl_hours: float = 6.0) -> Any:
@@ -101,6 +149,7 @@ class FlashScoreClient:
             "x-rapidapi-host": "flashscore4.p.rapidapi.com",
         }
         resp = requests.get(url, headers=headers, params=params, timeout=20)
+        self._record_quota(resp)
         if resp.status_code == 429:
             # Kota aşıldı -- tekrar denemek işe yaramaz (dakikalık değil, AYLIK
             # kota). Elimizde bu endpoint için eski (TTL'i geçmiş) bir cache

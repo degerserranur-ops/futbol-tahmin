@@ -649,15 +649,30 @@ HIGHLIGHT_HEADERS = ["Tarih", "Saat", "Ülke", "Lig", "Ev Sahibi", "Deplasman",
                       "Pazar", "Seçim", "Olasılık %"]
 
 
-def build_highlights_rows(rows: List[list], top_n: Optional[int] = None) -> List[list]:
+UST15_KESIN_ESIK = 90.0  # 1.5 Üst: backtest'te bu pazar iyi kalibre çıktı,
+# bu yüzden %90 ve üzerini gerçekten güvenilir/"kesin" sayıyoruz.
+CIFTE_SANS_KESIN_ESIK = 80.0  # Çifte Şans ayrıca backtest'te tek başına
+# test edilmedi (1X2'den türetilir); bu pazarın doğal tavanı 1.5 Üst'ten
+# daha düşük kalıyor (şu an en yükseği %92.4), bu yüzden karşılaştırılabilir
+# büyüklükte bir "yüksek güven" listesi için %80 eşiği kullanılıyor.
+
+
+def build_highlights_rows(
+    rows: List[list],
+    top_n: Optional[int] = None,
+    ust15_min: Optional[float] = UST15_KESIN_ESIK,
+    cs_min: Optional[float] = CIFTE_SANS_KESIN_ESIK,
+) -> List[list]:
     """'Öne Çıkanlar': her GÜN için (henüz oynanmamış maçlar arasından) 1.5
-    Üst % en yüksekten en düşüğe sıralı TÜM maçlar + Çifte Şans %
-    (1X/X2/12'nin en iyisi) en yüksekten en düşüğe sıralı TÜM maçlar.
-    top_n=None (varsayılan) o gün kaç uygun maç varsa hepsini listeler --
-    sabit bir sayı yok, dinamik. top_n bir sayı verilirse sadece o kadarını
-    keser (geriye dönük uyumluluk / istenirse sınırlama için). `rows` zaten
-    build_rows()'tan kronolojik geliyor (bkz. build_rows: sorted by
-    utcDate), bu yüzden gün grupları da sırayla çıkar.
+    Üst % >= ust15_min olan TÜM maçlar + Çifte Şans % (1X/X2/12'nin en
+    iyisi) >= cs_min olan TÜM maçlar, en yüksekten en düşüğe sıralı.
+    Eşiğin altındaki maçlar "öne çıkan" sayılmaz, listeye girmez -- yani
+    sabit bir SAYI sınırı yok (o gün eşiği geçen kaç maç varsa hepsi
+    girer), ama bir GÜVEN eşiği var. ust15_min/cs_min=None verilirse o
+    pazarda eşik uygulanmaz (eski davranış). top_n verilirse eşiği geçenler
+    arasından ayrıca ilk top_n kadarı alınır. `rows` zaten build_rows()'tan
+    kronolojik geliyor (bkz. build_rows: sorted by utcDate), bu yüzden gün
+    grupları da sırayla çıkar.
 
     Girdi satır indeksleri (0-indeksli, build_rows ile aynı):
       0 Tarih, 2 Saat, 3 Ülke, 4 Lig, 5 Ev Sahibi, 6 Deplasman, 7 Durum,
@@ -674,13 +689,15 @@ def build_highlights_rows(rows: List[list], top_n: Optional[int] = None) -> List
     cs_labels = ["1X", "X2", "12"]
 
     for tarih, day_rows in by_date.items():
-        # --- 1.5 Üst en iyileri ---
+        # --- 1.5 Üst: eşiği geçenler ---
         ust15_cands = [r for r in day_rows if r[22] is not None]
+        if ust15_min is not None:
+            ust15_cands = [r for r in ust15_cands if r[22] >= ust15_min]
         ust15_cands.sort(key=lambda r: r[22], reverse=True)
         for r in ust15_cands[:top_n]:
             out.append([r[0], r[2], r[3], r[4], r[5], r[6], "1.5 Üst", "Üst", round(r[22], 1)])
 
-        # --- Çifte Şans en iyileri (1X/X2/12 arasından en yüksek olan) ---
+        # --- Çifte Şans: eşiği geçenler (1X/X2/12 arasından en yüksek olan) ---
         cs_cands = []
         for r in day_rows:
             opts = [r[23], r[24], r[25]]
@@ -688,6 +705,8 @@ def build_highlights_rows(rows: List[list], top_n: Optional[int] = None) -> List
                 continue
             best_i = max(range(3), key=lambda i: opts[i])
             cs_cands.append((r, cs_labels[best_i], opts[best_i]))
+        if cs_min is not None:
+            cs_cands = [t for t in cs_cands if t[2] >= cs_min]
         cs_cands.sort(key=lambda t: t[2], reverse=True)
         for r, label, val in cs_cands[:top_n]:
             out.append([r[0], r[2], r[3], r[4], r[5], r[6], "Çifte Şans", label, round(val, 1)])

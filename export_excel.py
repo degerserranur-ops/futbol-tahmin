@@ -20,7 +20,7 @@ Kullanım:
 import argparse
 import datetime as dt
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -645,6 +645,125 @@ def build_rows(matches: List[dict], models: Dict[str, dict], enrich: Optional[Di
     return rows
 
 
+HIGHLIGHT_HEADERS = ["Tarih", "Saat", "Ülke", "Lig", "Ev Sahibi", "Deplasman",
+                      "Pazar", "Seçim", "Olasılık %"]
+
+
+def build_highlights_rows(rows: List[list], top_n: int = 3) -> List[list]:
+    """'Öne Çıkanlar': her GÜN için (henüz oynanmamış maçlar arasından) en
+    yüksek 1.5 Üst % olan top_n maç + en yüksek Çifte Şans % (1X/X2/12'nin
+    en iyisi) olan top_n maç. `rows` zaten build_rows()'tan kronolojik
+    geliyor (bkz. build_rows: sorted by utcDate), bu yüzden gün grupları da
+    sırayla çıkar.
+
+    Girdi satır indeksleri (0-indeksli, build_rows ile aynı):
+      0 Tarih, 2 Saat, 3 Ülke, 4 Lig, 5 Ev Sahibi, 6 Deplasman, 7 Durum,
+      22 1.5 Üst %, 23 1X %, 24 X2 %, 25 12 %
+    Çıktı sütunları: HIGHLIGHT_HEADERS ile aynı sırada.
+    """
+    by_date: "OrderedDict[str, list]" = OrderedDict()
+    for row in rows:
+        if row[7] == "Bitti":
+            continue
+        by_date.setdefault(row[0], []).append(row)
+
+    out: List[list] = []
+    cs_labels = ["1X", "X2", "12"]
+
+    for tarih, day_rows in by_date.items():
+        # --- 1.5 Üst en iyileri ---
+        ust15_cands = [r for r in day_rows if r[22] is not None]
+        ust15_cands.sort(key=lambda r: r[22], reverse=True)
+        for r in ust15_cands[:top_n]:
+            out.append([r[0], r[2], r[3], r[4], r[5], r[6], "1.5 Üst", "Üst", round(r[22], 1)])
+
+        # --- Çifte Şans en iyileri (1X/X2/12 arasından en yüksek olan) ---
+        cs_cands = []
+        for r in day_rows:
+            opts = [r[23], r[24], r[25]]
+            if any(o is None for o in opts):
+                continue
+            best_i = max(range(3), key=lambda i: opts[i])
+            cs_cands.append((r, cs_labels[best_i], opts[best_i]))
+        cs_cands.sort(key=lambda t: t[2], reverse=True)
+        for r, label, val in cs_cands[:top_n]:
+            out.append([r[0], r[2], r[3], r[4], r[5], r[6], "Çifte Şans", label, round(val, 1)])
+
+    return out
+
+
+def write_highlights_sheet(wb, highlight_rows: List[list]) -> None:
+    """'Öne Çıkanlar' adında yeni bir sekme ekler: ana tablodaki stil
+    mantığının sadeleştirilmiş hali (tek satır başlık + gün bazlı zebra +
+    pazar rengine göre vurgulu 'Olasılık %' hücresi)."""
+    ws = wb.create_sheet("Öne Çıkanlar")
+
+    FONT_NAME = "Calibri"
+    white_bold = Font(name=FONT_NAME, bold=True, color="FFFFFF", size=11)
+    base_font = Font(name=FONT_NAME, size=10)
+    team_font = Font(name=FONT_NAME, size=10, bold=True, color="1A1A1A")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    header_fill = PatternFill(start_color="27AE60", end_color="27AE60", fill_type="solid")
+    ust15_fill = PatternFill(start_color="EAF7EF", end_color="EAF7EF", fill_type="solid")
+    cs_fill = PatternFill(start_color="E8F6F3", end_color="E8F6F3", fill_type="solid")
+    date_band_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
+
+    n_cols = len(HIGHLIGHT_HEADERS)
+    for c, title in enumerate(HIGHLIGHT_HEADERS, start=1):
+        cell = ws.cell(row=1, column=c, value=title)
+        cell.font = white_bold
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = border
+    ws.row_dimensions[1].height = 22
+
+    r = 2
+    last_tarih = None
+    for row in highlight_rows:
+        tarih = row[0]
+        if tarih != last_tarih:
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_cols)
+            band_cell = ws.cell(row=r, column=1, value=f"  {tarih}")
+            band_cell.font = Font(name=FONT_NAME, bold=True, color="FFFFFF", size=10)
+            band_cell.fill = date_band_fill
+            band_cell.alignment = left
+            for c in range(1, n_cols + 1):
+                ws.cell(row=r, column=c).fill = date_band_fill
+                ws.cell(row=r, column=c).border = border
+            last_tarih = tarih
+            r += 1
+
+        pazar = row[6]
+        fill = ust15_fill if pazar == "1.5 Üst" else cs_fill
+        for c, val in enumerate(row, start=1):
+            cell = ws.cell(row=r, column=c, value=val)
+            cell.font = base_font
+            cell.border = border
+            cell.alignment = center
+            cell.fill = fill
+        ws.cell(row=r, column=5).font = team_font
+        ws.cell(row=r, column=5).alignment = left
+        ws.cell(row=r, column=6).font = team_font
+        ws.cell(row=r, column=6).alignment = left
+        oran_cell = ws.cell(row=r, column=9)
+        oran_cell.number_format = "0.0"
+        oran_cell.font = Font(name=FONT_NAME, size=10, bold=True,
+                               color="1E8449" if pazar == "1.5 Üst" else "117864")
+        r += 1
+
+    widths = [11, 6, 10, 19, 20, 20, 11, 9, 11]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.freeze_panes = "A2"
+    if r > 2:
+        ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{r - 1}"
+
+
 # Sütun sırası (1-indeksli, aşağıdaki grup/stil haritalarıyla hizalı):
 #  1 Tarih  2 Gün  3 Saat  4 Ülke  5 Lig  6 Ev Sahibi  7 Deplasman  8 Durum
 #  9 İY-Ev  10 İY-Dep  11 MS-Ev  12 MS-Dep
@@ -815,6 +934,10 @@ def write_excel(rows: List[list], out_path: str, meta: dict) -> None:
     ws.freeze_panes = "A3"
     ws.auto_filter.ref = f"A2:{get_column_letter(N_COLS)}{last_row}"
 
+    # --- Öne Çıkanlar sekmesi (en iyi 1.5 Üst + Çifte Şans, gün gün) ---
+    highlight_rows = build_highlights_rows(rows)
+    write_highlights_sheet(wb, highlight_rows)
+
     # --- Açıklama / lejant sekmesi ---
     info = wb.create_sheet("Bilgi")
     info["A1"] = "Futbol Maç Tahminleme Sistemi - Rapor Notları"
@@ -972,7 +1095,9 @@ def main():
         "competitions": comp_labels,
     }
     write_excel(rows, args.out, meta)
+    highlight_rows = build_highlights_rows(rows)
     print(f"Yazıldı: {args.out} ({len(rows)} satır, gösterim aralığı {display_start} -> {end})")
+    print(f"Öne Çıkanlar: {len(highlight_rows)} satır (1.5 Üst + Çifte Şans, gün gün en iyiler)")
 
     quota = FlashScoreClient().get_quota_status()
     if quota and quota.get("remaining") is not None:

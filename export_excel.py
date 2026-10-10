@@ -33,6 +33,7 @@ from data.football_data_client import FootballDataClient, FootballDataError
 from data.flashscore_client import (
     FlashScoreClient, FlashScoreError, fs_match_to_fd_shape, fs_live_match_to_fd_shape,
     find_match_id_by_teams, summarize_lineup_side, key_scorer_names, player_missing_from_lineup,
+    normalize_name,
 )
 from data.weather_client import get_weather_at
 from data import history_store
@@ -155,6 +156,68 @@ def collect_live_gap_matches(fs: FlashScoreClient, known_teams: set, code: str, 
             seen.add(fid)
             out.append(fs_live_match_to_fd_shape(m, code, name))
     return out
+
+
+def patch_football_data_live_gap(matches: List[dict]) -> None:
+    """collect_live_gap_matches'in 'bayat durum' düzeltmesi SADECE FlashScore
+    kaynaklı maçlarda çalışır (eşleştirme 'flashscore_match_id' alanına göre).
+    football-data.org'dan gelen maçlar (Premier League, La Liga, Serie A,
+    Bundesliga, Ligue 1, Eredivisie, Primeira Liga, Brezilya Serie A,
+    Championship, UCL) bu düzeltmeden hiç geçmiyordu -- football-data.org
+    cache'i (TTL 6 saat, tüm turnuva+tarih aralığı TEK bir cache anahtarı)
+    maç başladığı anda değil, cache süresi dolunca tazeleniyor. Sonuç: maç
+    fiilen oynanıyor olsa bile tabloda saatlerce 'Planlandı' kalabiliyordu.
+
+    Bu fonksiyon AYNI (zaten paylaşılan, kısa TTL'li) matches/list-by-date
+    taramasını kullanıp -- ek ağ isteği GENELDE gerekmez, çünkü bu run
+    içinde FlashScore ligleri için zaten çekilmiş oluyor -- hâlâ 'SCHEDULED'
+    görünen football-data.org maçlarını takım adına göre (normalize_name ile
+    alt-dize eşleştirmesi) bulup durumunu/skorunu yerinde günceller."""
+    try:
+        fs = FlashScoreClient()
+    except Exception:
+        return
+
+    covered_dates = set()
+    by_id: Dict[str, dict] = {}
+    for day_offset in range(config.LIVE_GAP_LOOKBACK_DAYS):
+        d = dt.date.today() - dt.timedelta(days=day_offset)
+        covered_dates.add(d.isoformat())
+        try:
+            day_data = fs.get_matches_by_date(d.isoformat())
+        except FlashScoreError:
+            continue
+        for t in day_data or []:
+            for m in t.get("matches", []):
+                by_id[m["match_id"]] = m
+    if not by_id:
+        return
+
+    candidates = [
+        (normalize_name(m["home_team"]["name"]), normalize_name(m["away_team"]["name"]), m)
+        for m in by_id.values()
+    ]
+
+    patched = 0
+    for mm in matches:
+        if mm.get("status") not in ("SCHEDULED", "TIMED"):
+            continue
+        if "flashscore_match_id" in mm:
+            continue  # bu zaten collect_live_gap_matches'ten geçti
+        if mm["utcDate"][:10] not in covered_dates:
+            continue
+        nh = normalize_name(mm["homeTeam"]["name"])
+        na = normalize_name(mm["awayTeam"]["name"])
+        for h, a, m in candidates:
+            if (nh in h or h in nh) and (na in a or a in na):
+                fresh = fs_live_match_to_fd_shape(m, mm["competition"]["code"], mm["competition"]["name"])
+                if fresh["status"] != "SCHEDULED":
+                    mm["status"] = fresh["status"]
+                    mm["score"] = fresh["score"]
+                    patched += 1
+                break
+    if patched:
+        print(f"  (football-data.org canlı/bitti düzeltmesi: {patched} maç)")
 
 
 def _merge_with_history(code: str, out: List[dict]) -> List[dict]:
@@ -858,6 +921,15 @@ def main():
             print(f"{league_info['name']} (FlashScore): {len(extra_matches)} maç")
             matches.extend(extra_matches)
             comp_labels.append(league_info["name"])
+
+    # football-data.org kaynaklı maçlar (Premier League, La Liga, Serie A,
+    # Bundesliga, Ligue 1, Eredivisie, Primeira Liga, Brezilya Serie A,
+    # Championship, UCL) 'canlı boşluk' düzeltmesinden FlashScore maçları
+    # gibi geçmiyordu -- bu yüzden maç başladıktan sonra football-data.org
+    # cache'i (TTL 6 saat) dolana kadar tabloda 'Planlandı' kalabiliyordu.
+    # Aynı (zaten ucuz/paylaşılan) matches/list-by-date taramasını kullanıp
+    # takım adıyla eşleştirerek bunları da yerinde düzeltiyoruz.
+    patch_football_data_live_gap(matches)
 
     models = build_models_per_competition(matches)
     for code, m in models.items():

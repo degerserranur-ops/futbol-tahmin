@@ -156,12 +156,17 @@ def collect_super_lig_matches() -> List[dict]:
     """Süper Lig'i football-data.org'da olmadığı için FlashScore'dan çeker ve
     diğer turnuvalarla aynı dict şekline çevirir. Hata olursa (key yok, limit
     aşıldı, vb.) sessizce boş liste döner -- Süper Lig olmadan da pipeline çalışsın."""
+    fs = FlashScoreClient()
+    results, fixtures = [], []
     try:
-        fs = FlashScoreClient()
         results = fs.get_super_lig_results(max_pages=2)
+    except FlashScoreError as e:
+        print(f"  UYARI [Süper Lig sonuçlar / FlashScore]: {e}")
+    try:
         fixtures = fs.get_super_lig_fixtures(max_pages=2)
     except FlashScoreError as e:
-        print(f"  UYARI [Süper Lig / FlashScore]: {e}")
+        print(f"  UYARI [Süper Lig fikstür / FlashScore]: {e}")
+    if not results and not fixtures:
         return []
 
     code = config.SUPER_LIG["code"]
@@ -192,12 +197,17 @@ def collect_flashscore_extra_league(league_key: str) -> List[dict]:
     info = config.FLASHSCORE_EXTRA_LEAGUES.get(league_key)
     if not info:
         return []
+    fs = FlashScoreClient()
+    results, fixtures = [], []
     try:
-        fs = FlashScoreClient()
         results = fs.get_tournament_results(info["tournament_template_id"], info["season_id"], max_pages=2)
+    except FlashScoreError as e:
+        print(f"  UYARI [{info['name']} sonuçlar / FlashScore]: {e}")
+    try:
         fixtures = fs.get_tournament_fixtures(info["tournament_template_id"], info["season_id"], max_pages=2)
     except FlashScoreError as e:
-        print(f"  UYARI [{info['name']} / FlashScore]: {e}")
+        print(f"  UYARI [{info['name']} fikstür / FlashScore]: {e}")
+    if not results and not fixtures:
         return []
 
     code = info["code"]

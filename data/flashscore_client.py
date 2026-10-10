@@ -70,6 +70,15 @@ class FlashScoreClient:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    def _read_stale_cache(self, path: str) -> Optional[Any]:
+        """TTL'i hiçe sayıp diskte her ne varsa onu döndürür -- 429 (kota
+        aşımı) durumunda tamamen boş dönmek yerine elimizdeki en son bilinen
+        veriyle devam etmek için kullanılır."""
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
     def _write_cache(self, path: str, data: Any) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
@@ -93,7 +102,15 @@ class FlashScoreClient:
         }
         resp = requests.get(url, headers=headers, params=params, timeout=20)
         if resp.status_code == 429:
-            raise FlashScoreError("FlashScore/RapidAPI istek limiti aşıldı (429).")
+            # Kota aşıldı -- tekrar denemek işe yaramaz (dakikalık değil, AYLIK
+            # kota). Elimizde bu endpoint için eski (TTL'i geçmiş) bir cache
+            # varsa onu kullan; hiç yoksa ancak o zaman hata ver. Böylece bir
+            # lig TAMAMEN kaybolmak yerine en son bilinen veriyle (biraz bayat
+            # da olsa) rapora girer.
+            stale = self._read_stale_cache(cache_path)
+            if stale is not None:
+                return stale
+            raise FlashScoreError("FlashScore/RapidAPI istek limiti aşıldı (429) ve bu veri için hiç cache yok.")
         if resp.status_code != 200:
             raise FlashScoreError(f"FlashScore isteği başarısız: {resp.status_code} {resp.text[:300]}")
         data = resp.json()
@@ -112,7 +129,10 @@ class FlashScoreClient:
                     "season_id": config.SUPER_LIG["season_id"],
                     "page": page,
                 },
-                ttl_hours=6.0,
+                # Bitmiş maç sonuçları artık DEĞİŞMEZ -- uzun TTL ile cache'lenir
+                # ki aynı gün içindeki art arda çalıştırmalar bu veriyi boşuna
+                # tekrar RapidAPI'den çekip aylık kotayı eritmesin.
+                ttl_hours=config.FLASHSCORE_RESULTS_TTL_HOURS,
             )
             if not data:
                 break
@@ -146,7 +166,8 @@ class FlashScoreClient:
             data = self.get(
                 "tournaments/results",
                 {"tournament_template_id": tournament_template_id, "season_id": season_id, "page": page},
-                ttl_hours=6.0,
+                # bkz. get_super_lig_results -- bitmiş maçlar değişmez, uzun TTL.
+                ttl_hours=config.FLASHSCORE_RESULTS_TTL_HOURS,
             )
             if not data:
                 break

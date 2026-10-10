@@ -64,6 +64,14 @@ CURRENT_SEASON = int(os.getenv("SEASON", "2026"))
 #     içinde) başlayacak, en fazla ENRICHMENT_MAX_MATCHES kadar maça uygulanır.
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 
+# Bitmiş maç sonuçları ("tournaments/results") bir kere çekildikten sonra asla
+# değişmez -- aynı gün içinde art arda "Güncelle" çalıştırıldığında bu veriyi
+# tekrar tekrar RapidAPI'den çekip aylık 500 isteklik kotayı eritmemek için
+# uzun bir TTL kullanılır (7 gün). Fikstür (henüz oynanmamış maçlar) çağrıları
+# bunun dışında -- onlar hâlâ kısa TTL (6 saat) ile tazeleniyor çünkü programı
+# değişebilir / yeni maçlar eklenebilir.
+FLASHSCORE_RESULTS_TTL_HOURS = 24.0 * 7
+
 SUPER_LIG = {
     "country_id": 191,
     "tournament_id": "ABdATjMP",

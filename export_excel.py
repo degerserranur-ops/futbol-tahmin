@@ -111,24 +111,28 @@ def collect_live_gap_matches(fs: FlashScoreClient, known_teams: set, code: str, 
        çekildiği anda 'SCHEDULED' (Planlandı) damgalanıyor ve maç sonradan
        canlıya geçse/bitse bile cache süresi dolana kadar hâlâ 'Planlandı'
        görünüyor (örn. saati gelmiş ama tabloda hâlâ başlamamış gösteriliyor).
-    Her ikisi için de bugünün TÜM dünya maçlarını (matches/list-by-date,
-    3 saatlik cache, run başına tek çağrı) tarayıp:
+    Her ikisi için de -- ve AYRICA, 'tournaments/results' artık uzun TTL ile
+    cache'lendiği için (bkz. config.FLASHSCORE_RESULTS_TTL_HOURS) results
+    cache'i bayatken yakın geçmişte biten bir maç hâlâ 'Planlandı' görünüp
+    kalabilir -- sadece bugünün değil, son config.LIVE_GAP_LOOKBACK_DAYS
+    günün TÜM dünya maçlarını (matches/list-by-date, kısa TTL, run başına
+    gün sayısı kadar çağrı -- ligler arası paylaşılır) tarayıp:
       - 'existing' içindeki (zaten results/fixtures'tan gelen) ve hâlâ
         'SCHEDULED' görünen maçların durumunu/skorunu TAZE veriyle günceller
         (yerinde, existing listesindeki dict'leri mutate ederek),
       - 'existing'te hiç olmayan (gerçek boşluk) maçları yeni liste olarak
         döndürür."""
-    try:
-        today_iso = dt.date.today().isoformat()
-        day_data = fs.get_matches_by_date(today_iso)
-    except FlashScoreError as e:
-        print(f"  UYARI [{name} / canlı maç taraması]: {e}")
-        return []
-
     by_id = {}
-    for t in day_data or []:
-        for m in t.get("matches", []):
-            by_id[m["match_id"]] = m
+    for day_offset in range(config.LIVE_GAP_LOOKBACK_DAYS):
+        date_iso = (dt.date.today() - dt.timedelta(days=day_offset)).isoformat()
+        try:
+            day_data = fs.get_matches_by_date(date_iso)
+        except FlashScoreError as e:
+            print(f"  UYARI [{name} / canlı maç taraması {date_iso}]: {e}")
+            continue
+        for t in day_data or []:
+            for m in t.get("matches", []):
+                by_id[m["match_id"]] = m
 
     # 1) bayat durumları güncelle (yerinde)
     for mm in existing:

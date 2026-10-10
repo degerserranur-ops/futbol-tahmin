@@ -72,6 +72,12 @@ RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 # değişebilir / yeni maçlar eklenebilir.
 FLASHSCORE_RESULTS_TTL_HOURS = 24.0 * 7
 
+# "tournaments/results" bayatken bile, az önce biten bir maçın hâlâ
+# 'Planlandı' görünüp kalmaması için matches/list-by-date ile kaç günlük
+# bir pencerenin (bugün dahil, geriye doğru) canlı/bitti durumu kontrol
+# edilir. display-lookback-days ile aynı mantık -- varsayılan 2 gün.
+LIVE_GAP_LOOKBACK_DAYS = 2
+
 SUPER_LIG = {
     "country_id": 191,
     "tournament_id": "ABdATjMP",

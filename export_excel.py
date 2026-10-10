@@ -649,12 +649,15 @@ HIGHLIGHT_HEADERS = ["Tarih", "Saat", "Ülke", "Lig", "Ev Sahibi", "Deplasman",
                       "Pazar", "Seçim", "Olasılık %"]
 
 
-def build_highlights_rows(rows: List[list], top_n: int = 3) -> List[list]:
-    """'Öne Çıkanlar': her GÜN için (henüz oynanmamış maçlar arasından) en
-    yüksek 1.5 Üst % olan top_n maç + en yüksek Çifte Şans % (1X/X2/12'nin
-    en iyisi) olan top_n maç. `rows` zaten build_rows()'tan kronolojik
-    geliyor (bkz. build_rows: sorted by utcDate), bu yüzden gün grupları da
-    sırayla çıkar.
+def build_highlights_rows(rows: List[list], top_n: Optional[int] = None) -> List[list]:
+    """'Öne Çıkanlar': her GÜN için (henüz oynanmamış maçlar arasından) 1.5
+    Üst % en yüksekten en düşüğe sıralı TÜM maçlar + Çifte Şans %
+    (1X/X2/12'nin en iyisi) en yüksekten en düşüğe sıralı TÜM maçlar.
+    top_n=None (varsayılan) o gün kaç uygun maç varsa hepsini listeler --
+    sabit bir sayı yok, dinamik. top_n bir sayı verilirse sadece o kadarını
+    keser (geriye dönük uyumluluk / istenirse sınırlama için). `rows` zaten
+    build_rows()'tan kronolojik geliyor (bkz. build_rows: sorted by
+    utcDate), bu yüzden gün grupları da sırayla çıkar.
 
     Girdi satır indeksleri (0-indeksli, build_rows ile aynı):
       0 Tarih, 2 Saat, 3 Ülke, 4 Lig, 5 Ev Sahibi, 6 Deplasman, 7 Durum,

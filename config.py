@@ -187,3 +187,34 @@ ELO_BLEND_WEIGHT = 0.30
 # Poisson modeli parametreleri
 RECENT_MATCHES_WINDOW = 10  # form hesaplarken bakılacak son maç sayısı
 MIN_MATCHES_FOR_MODEL = 8   # bir ligde tahmin üretmek için gereken min. bitmiş maç
+
+# ---- 2.5 Üst/Alt ve KG Var/Yok pazarları için Platt-scaling (lojistik
+# recalibrasyon) katsayıları ----
+# NEDEN: 2026-10-10 tarihli genişletilmiş walk-forward backtest'te (16 lig,
+# 647 test maçı -- football-data.org'un 10 ana ligi + FlashScore'un kalıcı
+# tarihçesindeki 9 ek lig) bu iki pazarın HAM Poisson olasılıkları kör
+# (eşit-olasılık) referanstan bile kötü çıktı: 2.5 Üst/Alt log-loss 0.7040
+# (kör: 0.693), KG Var/Yok log-loss 0.7087 (kör: 0.693) -- yani bu iki sütun
+# o haliyle yazı-turadan anlamlı farklı değildi.
+#
+# DOĞRULAMA: aynı 647 maçlık havuz KRONOLOJİK olarak ikiye bölündü (ilk yarı
+# FIT, ikinci yarı HELD-OUT -- fit hiç görmedi). Lojistik recalibrasyon
+# (p_kalibre = sigmoid(a + b*logit(p_ham))) sadece FIT yarısında bulundu,
+# HELD-OUT yarısında test edildi ve gerçekten iyileşti:
+#   2.5 Üst/Alt  HELD-OUT: log-loss 0.7162 -> 0.6856, Brier 0.5172 -> 0.4925
+#   KG Var/Yok   HELD-OUT: log-loss 0.7288 -> 0.7000, Brier 0.5314 -> 0.5064
+# b katsayılarının ikisi de ~0.46-0.49 (1'in altında) çıkması, modelin bu iki
+# pazarda SİSTEMATİK OLARAK fazla-güvenli (overconfident) olduğunu doğruluyor
+# -- recalibrasyon uç olasılıkları 0.5'e doğru çekiyor.
+#
+# Bu sabitler, kalıcı bir model parametresi değil, belirli bir tarihteki veri
+# setinden türetilmiş bir düzeltme -- veri havuzu büyüdükçe (match_history
+# büyüdükçe, yeni sezon başladıkça) periyodik olarak backtest ile yeniden
+# türetilmesi gerekir. models/poisson_model.py predict() içinde SADECE
+# "2.5_gol" ve "kg" çıktılarına uygulanır; skor matrisinin kendisi (en olası
+# skorlar, 1.5 gol, ilk yarı) etkilenmez -- backtest'te 1.5 Üst/Alt zaten iyi
+# kalibre çıkmıştı (log-loss 0.56), dokunulmadı.
+OU25_CALIB_A = 0.0624
+OU25_CALIB_B = 0.4564
+BTTS_CALIB_A = 0.1330
+BTTS_CALIB_B = 0.4889

@@ -16,11 +16,26 @@ yaklaşımdır; amaç istatistiksel bir tahmin/analiz aracı sunmaktır, kesin s
 garantisi değildir.
 """
 import datetime as dt
+import os
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.stats import poisson
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
+
+def _platt_calibrate(p: float, a: float, b: float) -> float:
+    """Lojistik recalibrasyon: p_kalibre = sigmoid(a + b*logit(p)). a=0,b=1
+    ise p'yi değiştirmeden döndürür (etkisiz/kimlik dönüşümü). bkz. config.py
+    OU25_CALIB_*/BTTS_CALIB_* -- katsayıların nereden geldiği orada açıklanıyor."""
+    p_clip = min(max(p, 1e-9), 1 - 1e-9)
+    logit_p = np.log(p_clip / (1 - p_clip))
+    z = a + b * logit_p
+    return float(1.0 / (1.0 + np.exp(-z)))
 
 
 def _dixon_coles_tau(x: int, y: int, lam: float, mu: float, rho: float) -> float:
@@ -187,29 +202,52 @@ class PoissonGoalModel:
         # beraberlikleri (özellikle 1-1) hafife alma eğilimini düzeltmek için,
         # zaten hesaplanmış attack/defense'i sabit tutup rho'yu 1-boyutlu
         # maksimum olabilirlik ile tahmin ediyoruz. Sadece 0-0/1-0/0-1/1-1
-        # skorlarını etkiler (bkz. score_matrix) -- diğer skorlarda etkisiz. ---
+        # skorlarını etkiler (bkz. score_matrix) -- diğer skorlarda etkisiz.
+        #
+        # NOT (backtest'te bulunan hata): eskiden bu tahmin SADECE en az 20
+        # düşük-skorlu maç varsa yapılıyordu, altındaysa sessizce rho=0'da
+        # (düzeltmesiz) kalıyordu. Geriye dönük testte bu eşiğin TAM altına
+        # düşen bir sürü lig (ör. Premier League n=19, Süper Lig n=18, Serie A
+        # n=12, Eredivisie n=8) hiç düzeltme almıyordu -- backtest'in gördüğü
+        # "model 1-1/0-0'ı hafife alıyor" sapmasının asıl nedeni büyük ölçüde
+        # buydu. Şimdi sabit bir açma/kapama eşiği yerine, örnek sayısı AZKEN
+        # tahmini 0'a doğru yumuşatan (shrinkage) bir yaklaşım kullanılıyor --
+        # az veri varken rho ılımlı kalır, çok veri varken ham MLE tahminine
+        # yaklaşır (attack/defense'teki shrinkage_k mantığıyla aynı fikir). ---
         try:
             import scipy.optimize as _opt
 
-            low_score_matches = []
-            for m in matches:
+            low_score_matches = []  # (x, y, lam, mu, agirlik)
+            for m, w in zip(matches, weights):
                 if (m.home_goals, m.away_goals) in ((0, 0), (1, 0), (0, 1), (1, 1)):
                     lam_h, lam_a = self.expected_goals(m.home, m.away)
-                    low_score_matches.append((m.home_goals, m.away_goals, lam_h, lam_a))
+                    low_score_matches.append((m.home_goals, m.away_goals, lam_h, lam_a, w))
 
-            if len(low_score_matches) >= 20:
+            n_eff_low = sum(w for *_, w in low_score_matches)
+            # en az birkaç düşük-skorlu maç olmadan yön/işaret bile güvenilir
+            # değil -- ama 20 gibi sert bir eşik değil, shrinkage zaten küçük
+            # örneklemi 0'a doğru çekiyor.
+            if n_eff_low >= 6:
                 def neg_log_lik(rho):
                     total = 0.0
-                    for x, y, lam, mu in low_score_matches:
+                    for x, y, lam, mu, w in low_score_matches:
                         tau = _dixon_coles_tau(x, y, lam, mu, rho)
                         if tau <= 1e-6:
                             return 1e6
-                        total += np.log(tau)
+                        total += w * np.log(tau)
                     return -total
 
-                res = _opt.minimize_scalar(neg_log_lik, bounds=(-0.25, 0.25), method="bounded")
+                # arama aralığı eskisinden (±0.25) daha geniş (±0.45) -- bazı
+                # ligler (ör. UNL) tam ±0.25 sınırına yapışıyordu, yani gerçek
+                # MLE optimumu daha da uçta olabiliyordu. Son değer yine de
+                # shrinkage ile yumuşatıldığı için aşırı uçlara savrulma riski
+                # sınırlı.
+                res = _opt.minimize_scalar(neg_log_lik, bounds=(-0.45, 0.45), method="bounded")
                 if res.success:
-                    self.rho = float(np.clip(res.x, -0.25, 0.25))
+                    rho_mle = float(np.clip(res.x, -0.45, 0.45))
+                    k_rho = 10.0  # shrinkage_k ile aynı mantık, rho için ayrı sabit
+                    rho_shrunk = rho_mle * n_eff_low / (n_eff_low + k_rho)
+                    self.rho = float(np.clip(rho_shrunk, -0.45, 0.45))
             # yetersiz veri varsa __init__'teki varsayılan (0.0, düzeltme yok) kalır
         except Exception:
             # rho tahmini başarısız olursa modeli bozmak yerine düzeltmesiz (0.0) bırak
@@ -320,6 +358,17 @@ class PoissonGoalModel:
         under_2_5 = 1 - over_2_5
 
         btts_yes = float(matrix[1:, 1:].sum())
+        btts_no = 1 - btts_yes
+
+        # Platt-scaling recalibrasyonu (bkz. config.py OU25_CALIB_*/BTTS_CALIB_*
+        # -- backtest'te bu iki pazarın ham Poisson olasılıklarının kör
+        # referanstan bile kötü çıktığı, modelin burada sistematik olarak
+        # fazla-güvenli olduğu bulundu). SADECE bu iki pazarı etkiler --
+        # score_matrix'in kendisi (en olası skorlar, 1.5 gol, ilk yarı)
+        # değişmeden kalır.
+        over_2_5 = _platt_calibrate(over_2_5, config.OU25_CALIB_A, config.OU25_CALIB_B)
+        under_2_5 = 1 - over_2_5
+        btts_yes = _platt_calibrate(btts_yes, config.BTTS_CALIB_A, config.BTTS_CALIB_B)
         btts_no = 1 - btts_yes
 
         # 1.5 gol üst/alt (toplamda 2 veya daha fazla gol olma olasılığı)

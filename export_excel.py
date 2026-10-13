@@ -1013,7 +1013,7 @@ def main():
     parser = argparse.ArgumentParser(description="Avrupa ligleri maç + tahmin tablosunu Excel'e aktar")
     parser.add_argument("--lookback-days", type=int, default=40,
                          help="Model eğitimi için geriye kaç gün taransın (ne kadar çok, o kadar sağlam istatistik)")
-    parser.add_argument("--display-lookback-days", type=int, default=3,
+    parser.add_argument("--display-lookback-days", type=int, default=1,
                          help="Tabloda GÖSTERİLECEK geçmiş gün sayısı (eğitim penceresinden ayrı, daha küçük tutulur)")
     parser.add_argument("--forward-days", type=int, default=3)
     parser.add_argument("--competitions", nargs="*", default=list(config.COMPETITIONS.keys()))

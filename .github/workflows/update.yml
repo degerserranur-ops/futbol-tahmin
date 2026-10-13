@@ -1,0 +1,67 @@
+name: Güncelle (maç tahminleri)
+
+on:
+  schedule:
+    # Günde 4 kez: 08:07 / 13:07 / 18:07 / 23:07 İstanbul saati (UTC+3, DST yok)
+    # -> UTC: 05:07 / 10:07 / 15:07 / 20:07
+    - cron: "7 5,10,15,20 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: futbol-tahmin-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bağımlılıkları kur
+        run: pip install -r requirements.txt
+
+      - name: export_excel.py çalıştır (geçici hatalarda tekrar dene)
+        env:
+          FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        run: |
+          set +e
+          for i in 1 2 3; do
+            echo "=== export_excel.py deneme $i/3 ==="
+            python export_excel.py
+            status=$?
+            if [ $status -eq 0 ]; then
+              break
+            fi
+            echo "Deneme $i başarısız (exit $status), kısa bir bekleme sonrası tekrar denenecek..."
+            sleep 20
+          done
+          exit $status
+
+      - name: Google Sheets'e aktar
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python push_to_sheets.py
+
+      - name: Değişiklikleri commit'le ve push'la
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add maclar_ve_tahminler.xlsx match_history/
+          if git diff --cached --quiet; then
+            echo "Değişiklik yok, commit atlanıyor."
+            exit 0
+          fi
+          git commit -m "Güncelle: otomatik GitHub Actions güncellemesi ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+          git push origin HEAD:main

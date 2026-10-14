@@ -147,6 +147,11 @@ FLASHSCORE_EXTRA_LEAGUES = {
         "tournament_id": "A332sepf", "tournament_stage_id": "A1uGXGgK",
         "tournament_template_id": "A9yxE9Ke", "season_id": "190",
     },
+    "MLS": {
+        "code": "MLS", "name": "MLS", "ulke": "ABD",
+        "tournament_id": "tUfctlzI", "tournament_stage_id": "bgQzSI5N",
+        "tournament_template_id": "CQv5qrFt", "season_id": "185",
+    },
 }
 for _key, _info in FLASHSCORE_EXTRA_LEAGUES.items():
     FLASHSCORE_TOURNAMENTS[_key] = {

@@ -18,6 +18,7 @@ veriyor (x-ratelimit-requests-limit header'ından görülüyor). Bu yüzden:
 import hashlib
 import json
 import os
+import re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,26 @@ QUOTA_FILE_NAME = "_flashscore_quota.json"
 
 class FlashScoreError(RuntimeError):
     pass
+
+
+_COUNTRY_SUFFIX_RE = re.compile(r"\s*\([A-Za-z]{3}\)$")
+
+
+def strip_country_suffix(name: str) -> str:
+    """FlashScore, Avrupa kupalarının ELEME TURLARINDA (çok sayıda aynı/benzer
+    isimli kulübü ayırt etmek için) takım adının sonuna '(Ülke)' kısaltması
+    ekliyor -- örn. 'Gent (Bel)'. Ama LİG FAZI (asıl) maçlarında aynı takım
+    bu ek OLMADAN görünüyor -- 'Gent'. Bu iki farklı string, Poisson/Elo
+    modelinde FARKLI takım olarak algılanıp o takımın eleme formunu lig
+    fazına hiç taşımıyordu; daha da önemlisi, bir takım lig fazında henüz
+    hiç oynamadıysa (adı sadece eleme turundaki suffix'li haliyle training
+    havuzunda varsa) model onu "bilinmiyor" sayıp nötr (lig ortalaması)
+    tahmine düşüyordu -- bu da aynı güne denk gelen birden fazla maçın
+    BİREBİR AYNI yüzdelerle çıkmasına yol açıyordu (ör. UECL/UEL'de görülen
+    sapma). Bu fonksiyon o suffix'i atıp iki ismi aynı takıma indiriyor."""
+    if not name:
+        return name
+    return _COUNTRY_SUFFIX_RE.sub("", name).strip()
 
 
 def normalize_name(name: str) -> str:
@@ -372,8 +393,8 @@ def fs_match_to_fd_shape(m: dict, competition_code: str, competition_name: str, 
             "fullTime": {"home": home_g, "away": away_g},
             "halfTime": {"home": None, "away": None},
         },
-        "homeTeam": {"name": m["home_team"]["name"]},
-        "awayTeam": {"name": m["away_team"]["name"]},
+        "homeTeam": {"name": strip_country_suffix(m["home_team"]["name"])},
+        "awayTeam": {"name": strip_country_suffix(m["away_team"]["name"])},
         "competition": {"code": competition_code, "name": competition_name},
     }
 
@@ -408,8 +429,8 @@ def fs_live_match_to_fd_shape(m: dict, competition_code: str, competition_name: 
             "fullTime": {"home": scores.get("home"), "away": scores.get("away")},
             "halfTime": {"home": None, "away": None},
         },
-        "homeTeam": {"name": m["home_team"]["name"]},
-        "awayTeam": {"name": m["away_team"]["name"]},
+        "homeTeam": {"name": strip_country_suffix(m["home_team"]["name"])},
+        "awayTeam": {"name": strip_country_suffix(m["away_team"]["name"])},
         "competition": {"code": competition_code, "name": competition_name},
     }
 
